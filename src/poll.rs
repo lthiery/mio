@@ -470,6 +470,26 @@ impl fmt::Debug for Poll {
 }
 
 impl Registry {
+    /// Register an [`event::SharedSource`] with the `Poll` instance through a
+    /// shared reference.
+    ///
+    /// This is [`register`] for a source that cannot be borrowed mutably, for
+    /// example a socket that is registered on its first use while another
+    /// thread may already use it. It has the same semantics as [`register`],
+    /// including that registering a source that is already registered is
+    /// unspecified behavior. See [`event::SharedSource`] for what may run
+    /// concurrently with it.
+    ///
+    /// [`register`]: Self::register
+    pub fn register_shared<S: event::SharedSource + ?Sized>(
+        &self,
+        source: &S,
+        token: Token,
+        interests: Interest,
+    ) -> io::Result<()> {
+        source.register_shared(self, token, interests)
+    }
+
     /// Register an [`event::Source`] with the `Poll` instance.
     ///
     /// Once registered, the `Poll` instance will monitor the event source for

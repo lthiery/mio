@@ -324,6 +324,17 @@ impl Write for &'_ TcpStream {
     }
 }
 
+impl event::SharedSource for TcpStream {
+    fn register_shared(
+        &self,
+        registry: &Registry,
+        token: Token,
+        interests: Interest,
+    ) -> io::Result<()> {
+        event::SharedSource::register_shared(&self.inner, registry, token, interests)
+    }
+}
+
 impl event::Source for TcpStream {
     fn register(
         &mut self,

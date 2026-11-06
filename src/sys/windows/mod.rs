@@ -50,7 +50,7 @@ cfg_io_source! {
     use std::io;
     use std::os::windows::io::RawSocket;
     use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
     use crate::{Interest, Registry, Token};
 
@@ -69,26 +69,45 @@ cfg_io_source! {
     }
 
     pub struct IoSourceState {
-        // This is `None` if the socket has not yet been registered.
+        // Set once the socket is registered, and cleared when it is
+        // deregistered.
         //
         // We box the internal state to not increase the size on the stack as the
         // type might move around a lot.
-        inner: Option<Box<InternalState>>,
+        inner: OnceLock<Box<InternalState>>,
+        // Serializes registration through a shared reference, and I/O that
+        // starts before `inner` is set: the selector can deliver an event
+        // before registration sets `inner`, and I/O that then returns
+        // `WouldBlock` must be able to rearm.
+        registering: Mutex<()>,
     }
 
     impl IoSourceState {
         pub fn new() -> IoSourceState {
-            IoSourceState { inner: None }
+            IoSourceState {
+                inner: OnceLock::new(),
+                registering: Mutex::new(()),
+            }
         }
 
         pub fn do_io<T, F, R>(&self, f: F, io: &T) -> io::Result<R>
         where
             F: FnOnce(&T) -> io::Result<R>,
         {
-            let result = f(io);
+            if let Some(state) = self.inner.get() {
+                return Self::rearm_on_would_block(Some(&**state), f(io));
+            }
+            let _guard = self.registering.lock().unwrap_or_else(PoisonError::into_inner);
+            Self::rearm_on_would_block(self.inner.get().map(Box::as_ref), f(io))
+        }
+
+        fn rearm_on_would_block<R>(
+            state: Option<&InternalState>,
+            result: io::Result<R>,
+        ) -> io::Result<R> {
             if let Err(ref e) = result {
                 if e.kind() == io::ErrorKind::WouldBlock {
-                    self.inner.as_ref().map_or(Ok(()), |state| {
+                    state.map_or(Ok(()), |state| {
                         state
                             .selector
                             .reregister(state.sock_state.clone(), state.token, state.interests)
@@ -99,22 +118,21 @@ cfg_io_source! {
         }
 
         pub fn register(
-            &mut self,
+            &self,
             registry: &Registry,
             token: Token,
             interests: Interest,
             socket: RawSocket,
         ) -> io::Result<()> {
-            if self.inner.is_some() {
-                Err(io::ErrorKind::AlreadyExists.into())
-            } else {
-                registry
-                    .selector()
-                    .register(socket, token, interests)
-                    .map(|state| {
-                        self.inner = Some(Box::new(state));
-                    })
+            let _guard = self.registering.lock().unwrap_or_else(PoisonError::into_inner);
+            if self.inner.get().is_some() {
+                return Err(io::ErrorKind::AlreadyExists.into());
             }
+
+            let state = registry.selector().register(socket, token, interests)?;
+            // `inner` is empty and the lock is held, so this cannot fail.
+            let _ = self.inner.set(Box::new(state));
+            Ok(())
         }
 
         pub fn reregister(
@@ -123,7 +141,7 @@ cfg_io_source! {
             token: Token,
             interests: Interest,
         ) -> io::Result<()> {
-            match self.inner.as_mut() {
+            match self.inner.get_mut() {
                 Some(state) => {
                     registry
                         .selector()
@@ -138,13 +156,10 @@ cfg_io_source! {
         }
 
         pub fn deregister(&mut self) -> io::Result<()> {
-            match self.inner.as_mut() {
+            match self.inner.take() {
                 Some(state) => {
-                    {
-                        let mut sock_state = state.sock_state.lock().unwrap();
-                        sock_state.mark_delete();
-                    }
-                    self.inner = None;
+                    let mut sock_state = state.sock_state.lock().unwrap();
+                    sock_state.mark_delete();
                     Ok(())
                 }
                 None => Err(io::ErrorKind::NotFound.into()),

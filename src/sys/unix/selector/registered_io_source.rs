@@ -10,7 +10,7 @@ use std::os::fd::RawFd;
 // can use `std::os::fd` and be merged with the above.
 #[cfg(target_os = "hermit")]
 use std::os::hermit::io::RawFd;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use crate::sys::Selector;
 use crate::{Interest, Registry, Token};
@@ -46,7 +46,13 @@ impl RegistrationRecord {
 
 cfg_io_source! {
 pub(crate) struct IoSourceState {
-    inner: Option<Box<InternalState>>,
+    // Set once the source is registered, and cleared when it is deregistered.
+    inner: OnceLock<Box<InternalState>>,
+    // Serializes registration through a shared reference, and I/O that starts
+    // before `inner` is set: the selector can deliver an event before
+    // registration sets `inner`, and I/O that then returns `WouldBlock` must
+    // be able to rearm.
+    registering: Mutex<()>,
 }
 
 struct InternalState {
@@ -61,18 +67,30 @@ struct InternalState {
 cfg_io_source! {
 impl IoSourceState {
     pub(crate) fn new() -> IoSourceState {
-        IoSourceState { inner: None }
+        IoSourceState {
+            inner: OnceLock::new(),
+            registering: Mutex::new(()),
+        }
     }
 
     pub(crate) fn do_io<T, F, R>(&self, f: F, io: &T) -> io::Result<R>
     where
         F: FnOnce(&T) -> io::Result<R>,
     {
-        let result = f(io);
+        if let Some(state) = self.inner.get() {
+            return Self::rearm_on_would_block(Some(&**state), f(io));
+        }
+        let _guard = self.registering.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::rearm_on_would_block(self.inner.get().map(Box::as_ref), f(io))
+    }
 
+    fn rearm_on_would_block<R>(
+        state: Option<&InternalState>,
+        result: io::Result<R>,
+    ) -> io::Result<R> {
         if let Err(err) = &result {
             if err.kind() == io::ErrorKind::WouldBlock {
-                self.inner.as_ref().map_or(Ok(()), |state| {
+                state.map_or(Ok(()), |state| {
                     state
                         .selector
                         .reregister(state.fd, state.token, state.interests)
@@ -84,31 +102,29 @@ impl IoSourceState {
     }
 
     pub(crate) fn register(
-        &mut self,
+        &self,
         registry: &Registry,
         token: Token,
         interests: Interest,
         fd: RawFd,
     ) -> io::Result<()> {
-        if self.inner.is_some() {
-            Err(io::ErrorKind::AlreadyExists.into())
-        } else {
-            let selector = registry.selector().try_clone()?;
-
-            selector
-                .register_internal(fd, token, interests)
-                .map(move |shared_record| {
-                    let state = InternalState {
-                        selector,
-                        token,
-                        interests,
-                        fd,
-                        shared_record,
-                    };
-
-                    self.inner = Some(Box::new(state));
-                })
+        let _guard = self.registering.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.inner.get().is_some() {
+            return Err(io::ErrorKind::AlreadyExists.into());
         }
+
+        let selector = registry.selector().try_clone()?;
+        let shared_record = selector.register_internal(fd, token, interests)?;
+        let state = InternalState {
+            selector,
+            token,
+            interests,
+            fd,
+            shared_record,
+        };
+        // `inner` is empty and the lock is held, so this cannot fail.
+        let _ = self.inner.set(Box::new(state));
+        Ok(())
     }
 
     pub(crate) fn reregister(
@@ -118,7 +134,7 @@ impl IoSourceState {
         interests: Interest,
         fd: RawFd,
     ) -> io::Result<()> {
-        match self.inner.as_mut() {
+        match self.inner.get_mut() {
             Some(state) => registry
                 .selector()
                 .reregister(fd, token, interests)

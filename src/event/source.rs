@@ -137,3 +137,28 @@ where
         (**self).deregister(registry)
     }
 }
+
+/// An event source that can be registered through a shared reference.
+///
+/// This allows registering a source that may already be in use for I/O, for
+/// example to register a socket on its first use. Registering through
+/// [`Registry::register_shared`] has the same semantics as
+/// [`Registry::register`]; in particular, registering a source that is already
+/// registered is unspecified behavior, so callers that can race to register a
+/// source must serialize the attempts. I/O on the source may run concurrently
+/// with its registration, and a registration that fails may be retried.
+///
+/// Reregistration and deregistration still require exclusive access through
+/// [`Source`].
+///
+/// Implementations must make the state their I/O operations need to rearm
+/// readiness available before those operations observe the registration.
+pub trait SharedSource: Source {
+    /// Register this source, preserving the state used by its I/O operations.
+    fn register_shared(
+        &self,
+        registry: &Registry,
+        token: Token,
+        interests: Interest,
+    ) -> io::Result<()>;
+}

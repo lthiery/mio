@@ -72,13 +72,13 @@ impl<T> IoSource<T> {
     /// Registers the source through `register`, associating it with
     /// `registry` in debug builds unless registration fails.
     fn register_with(
-        &mut self,
+        &self,
         _registry: &Registry,
-        register: impl FnOnce(&mut IoSourceState, &T) -> io::Result<()>,
+        register: impl FnOnce(&IoSourceState, &T) -> io::Result<()>,
     ) -> io::Result<()> {
         #[cfg(debug_assertions)]
         self.selector_id.associate(_registry)?;
-        let result = register(&mut self.state, &self.inner);
+        let result = register(&self.state, &self.inner);
         #[cfg(debug_assertions)]
         if result.is_err() {
             // The association above is ours, so removing it cannot fail.
@@ -137,9 +137,7 @@ where
         token: Token,
         interests: Interest,
     ) -> io::Result<()> {
-        self.register_with(registry, |state, io| {
-            state.register(registry, token, interests, io.as_raw_fd())
-        })
+        event::SharedSource::register_shared(self, registry, token, interests)
     }
 
     fn reregister(
@@ -172,9 +170,7 @@ where
         token: Token,
         interests: Interest,
     ) -> io::Result<()> {
-        self.register_with(registry, |state, io| {
-            state.register(registry, token, interests, io.as_raw_socket())
-        })
+        event::SharedSource::register_shared(self, registry, token, interests)
     }
 
     fn reregister(
@@ -206,11 +202,7 @@ where
         token: Token,
         interests: Interest,
     ) -> io::Result<()> {
-        self.register_with(registry, |_, io| {
-            registry
-                .selector()
-                .register(io.as_raw_fd() as _, token, interests)
-        })
+        event::SharedSource::register_shared(self, registry, token, interests)
     }
 
     fn reregister(
@@ -330,5 +322,62 @@ impl Clone for SelectorId {
         SelectorId {
             id: AtomicUsize::new(self.id.load(Ordering::Acquire)),
         }
+    }
+}
+
+#[cfg(any(
+    unix,
+    target_os = "hermit",
+    all(target_os = "wasi", not(target_env = "p1"))
+))]
+impl<T> event::SharedSource for IoSource<T>
+where
+    T: AsRawFd,
+{
+    fn register_shared(
+        &self,
+        registry: &Registry,
+        token: Token,
+        interests: Interest,
+    ) -> io::Result<()> {
+        self.register_with(registry, |state, io| {
+            state.register(registry, token, interests, io.as_raw_fd())
+        })
+    }
+}
+
+#[cfg(windows)]
+impl<T> event::SharedSource for IoSource<T>
+where
+    T: AsRawSocket,
+{
+    fn register_shared(
+        &self,
+        registry: &Registry,
+        token: Token,
+        interests: Interest,
+    ) -> io::Result<()> {
+        self.register_with(registry, |state, io| {
+            state.register(registry, token, interests, io.as_raw_socket())
+        })
+    }
+}
+
+#[cfg(all(target_os = "wasi", target_env = "p1"))]
+impl<T> event::SharedSource for IoSource<T>
+where
+    T: AsRawFd,
+{
+    fn register_shared(
+        &self,
+        registry: &Registry,
+        token: Token,
+        interests: Interest,
+    ) -> io::Result<()> {
+        self.register_with(registry, |_, io| {
+            registry
+                .selector()
+                .register(io.as_raw_fd() as _, token, interests)
+        })
     }
 }

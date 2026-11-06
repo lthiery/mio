@@ -53,7 +53,7 @@ cfg_io_source! {
     #[cfg(any(unix, target_os = "hermit"))]
     impl IoSourceState {
         pub fn register(
-            &mut self,
+            &self,
             _: &Registry,
             _: Token,
             _: Interest,
@@ -80,7 +80,7 @@ cfg_io_source! {
     #[cfg(windows)]
     impl IoSourceState {
          pub fn register(
-            &mut self,
+            &self,
             _: &Registry,
             _: Token,
             _: Interest,

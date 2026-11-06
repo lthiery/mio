@@ -22,7 +22,7 @@ impl IoSourceState {
     }
 
     pub(crate) fn register(
-        &mut self,
+        &self,
         registry: &Registry,
         token: Token,
         interests: Interest,

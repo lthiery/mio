@@ -69,6 +69,24 @@ impl<T> IoSource<T> {
         self.state.do_io(f, &self.inner)
     }
 
+    /// Registers the source through `register`, associating it with
+    /// `registry` in debug builds unless registration fails.
+    fn register_with(
+        &mut self,
+        _registry: &Registry,
+        register: impl FnOnce(&mut IoSourceState, &T) -> io::Result<()>,
+    ) -> io::Result<()> {
+        #[cfg(debug_assertions)]
+        self.selector_id.associate(_registry)?;
+        let result = register(&mut self.state, &self.inner);
+        #[cfg(debug_assertions)]
+        if result.is_err() {
+            // The association above is ours, so removing it cannot fail.
+            let _ = self.selector_id.remove_association(_registry);
+        }
+        result
+    }
+
     /// Returns the I/O source, dropping the state.
     ///
     /// # Notes
@@ -119,10 +137,9 @@ where
         token: Token,
         interests: Interest,
     ) -> io::Result<()> {
-        #[cfg(debug_assertions)]
-        self.selector_id.associate(registry)?;
-        self.state
-            .register(registry, token, interests, self.inner.as_raw_fd())
+        self.register_with(registry, |state, io| {
+            state.register(registry, token, interests, io.as_raw_fd())
+        })
     }
 
     fn reregister(
@@ -155,10 +172,9 @@ where
         token: Token,
         interests: Interest,
     ) -> io::Result<()> {
-        #[cfg(debug_assertions)]
-        self.selector_id.associate(registry)?;
-        self.state
-            .register(registry, token, interests, self.inner.as_raw_socket())
+        self.register_with(registry, |state, io| {
+            state.register(registry, token, interests, io.as_raw_socket())
+        })
     }
 
     fn reregister(
@@ -190,11 +206,11 @@ where
         token: Token,
         interests: Interest,
     ) -> io::Result<()> {
-        #[cfg(debug_assertions)]
-        self.selector_id.associate(registry)?;
-        registry
-            .selector()
-            .register(self.inner.as_raw_fd() as _, token, interests)
+        self.register_with(registry, |_, io| {
+            registry
+                .selector()
+                .register(io.as_raw_fd() as _, token, interests)
+        })
     }
 
     fn reregister(
@@ -250,9 +266,16 @@ impl SelectorId {
     /// already registered.
     fn associate(&self, registry: &Registry) -> io::Result<()> {
         let registry_id = registry.selector().id();
-        let previous_id = self.id.swap(registry_id, Ordering::AcqRel);
+        // Leave an existing association in place: a rejected registration
+        // must not replace the registry the source is registered with.
+        let result = self.id.compare_exchange(
+            Self::UNASSOCIATED,
+            registry_id,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
 
-        if previous_id == Self::UNASSOCIATED {
+        if result.is_ok() {
             Ok(())
         } else {
             Err(io::Error::new(

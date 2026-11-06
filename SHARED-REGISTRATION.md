@@ -154,25 +154,29 @@ for that path is the lock, not a test.
   feedback.
 - On stateful backends, I/O on an unregistered source now takes an
   uncontended mutex, held across the operation. Registration takes it too,
-  including exclusive `register`. Throughput and latency are unmeasured;
-  epoll and kqueue are unaffected by construction.
+  including exclusive `register`. Not benchmarked on the stateful backends;
+  epoll and kqueue are unaffected by construction. Through Tokio's
+  `net_accept` bench on epoll (2026-11-06), `register_shared` is
+  indistinguishable from the old `SourceFd` registration.
 - Review the trait name, scope, documented concurrency guarantees, and whether
   other socket types should implement it in the initial upstream proposal.
 - Test Windows and other stateful backends at runtime, including races, error
   recovery, and repeated register/deregister cycles.
-- Adapt Tokio separately. Its deferred registration currently retains only a
-  raw descriptor; it will need access to the actual Mio source when registering
-  through this API. Merely replacing `SourceFd` at the call site is insufficient.
-  Proposed shape (not started): `PollEvented::new_deferred` stores a plain
-  `fn(&E) -> &dyn SharedSource`, `registration()` hands the source to the
-  first-use path, and deregistration goes through the real `&mut io`. That
-  removes `Deferred.fd`, the `SourceFd` paths and the unix-only cfgs.
+- Tokio integration: DONE locally, branch `tcp-shared-registration` in
+  `/home/louis/tokio-lazy-reg` (2026-11-06). `PollEvented` stores a
+  `fn(&E) -> &(dyn SharedSource + Sync)`; `registration()` returns a
+  `RegistrationRef` that registers through it on first use; deregistration
+  goes through the real `&mut io`. No `SourceFd`, no unix-only cfgs; Windows
+  defers too. A three-burst read test fails on the old `SourceFd` branch with
+  forced poll and passes with this API. The workspace points at this checkout
+  through a DO NOT MERGE `[patch.crates-io]` commit.
+- Out of scope but related: Tokio's `AsyncFd` registers a `SourceFd` too, and
+  upstream Tokio already fails and hangs in `io_async_fd` on forced poll. An
+  `AsyncFd` wraps an arbitrary descriptor, so this API does not cover it.
 - Revisit Tokio's observable behavior and documentation: registration errors
   move to first use, metrics count registration later, and an unused stream
   first accessed after runtime shutdown cannot register.
 
-The next useful milestone is a Tokio integration that uses the actual Mio
-stream on every supported backend, followed by comparative benchmarks and
-runtime validation on Windows. That will establish whether the API shape is
-sufficient and what implementation costs need to be reduced before upstream
-discussion.
+The Tokio integration works, so the API shape covers what Tokio needs. Still
+to do before upstream discussion: runtime validation on Windows, and deciding
+which implementation costs need to come down.

@@ -2,7 +2,6 @@
 
 use mio::{net::TcpStream, Events, Interest, Poll, Token};
 use std::io::{self, Read, Write};
-use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 fn pair() -> (TcpStream, std::net::TcpStream) {
@@ -70,6 +69,8 @@ fn shared_registration_rearms_and_supports_exclusive_lifecycle() {
 #[cfg(debug_assertions)]
 #[test]
 fn racing_registration_is_detected_in_debug_builds() {
+    use std::sync::{Arc, Barrier};
+
     let (stream, _peer) = pair();
     let stream = Arc::new(stream);
     let barrier = Arc::new(Barrier::new(3));

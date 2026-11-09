@@ -133,3 +133,72 @@ fn failed_os_registration_can_be_retried() {
         .unwrap();
     poll.registry().deregister(&mut stream).unwrap();
 }
+
+/// The motivating case for shared registration: a caller that only has `&`
+/// to a mio socket can register it today only through `SourceFd`, which skips
+/// the socket's own rearming state. On the poll(2) selector that stream gets
+/// one readable event and then none; through `register_shared` it keeps
+/// getting them.
+#[cfg(all(feature = "os-ext", unix))]
+#[test]
+fn shared_registration_rearms_where_sourcefd_does_not() {
+    use std::os::fd::AsRawFd;
+
+    fn bursts_received(register: impl FnOnce(&Poll, &TcpStream, Token)) -> usize {
+        let (stream, mut peer) = pair();
+        let mut poll = Poll::new().unwrap();
+        register(&poll, &stream, Token(1));
+        let mut received = 0;
+        let mut events = Events::with_capacity(16);
+        for byte in *b"abc" {
+            peer.write_all(&[byte]).unwrap();
+            // Wait briefly for readiness; a dead registration never fires.
+            let deadline = Instant::now() + Duration::from_millis(500);
+            let mut readable = false;
+            while Instant::now() < deadline && !readable {
+                poll.poll(&mut events, Some(Duration::from_millis(50)))
+                    .unwrap();
+                readable = events
+                    .iter()
+                    .any(|e| e.token() == Token(1) && e.is_readable());
+            }
+            if !readable {
+                break;
+            }
+            received += 1;
+            let mut buf = [0];
+            (&stream).read_exact(&mut buf).unwrap();
+            assert_eq!(buf, [byte]);
+            // Drain to WouldBlock, which is where a registered socket rearms.
+            assert_eq!(
+                (&stream).read(&mut buf).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+        received
+    }
+
+    let via_shared = bursts_received(|poll, stream, token| {
+        poll.registry()
+            .register_shared(stream, token, Interest::READABLE)
+            .unwrap();
+    });
+    assert_eq!(via_shared, 3, "register_shared must keep rearming");
+
+    let via_source_fd = bursts_received(|poll, stream, token| {
+        let fd = stream.as_raw_fd();
+        poll.registry()
+            .register(&mut mio::unix::SourceFd(&fd), token, Interest::READABLE)
+            .unwrap();
+    });
+    // epoll and kqueue rearm in the kernel, so SourceFd works there; the
+    // poll(2) selector relies on `do_io`, which SourceFd bypasses.
+    if cfg!(mio_unsupported_force_poll_poll) {
+        assert_eq!(
+            via_source_fd, 1,
+            "SourceFd stops after the first event on poll(2)"
+        );
+    } else {
+        assert_eq!(via_source_fd, 3);
+    }
+}

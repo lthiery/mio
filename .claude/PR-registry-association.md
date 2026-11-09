@@ -1,6 +1,6 @@
 # DRAFT: mio PR "Keep the debug registry association on failed registrations". NOT POSTED.
 
-Branch `registry-association` on lthiery/mio, 1 commit 7e1b42a (amended, no
+Branch `registry-association` on lthiery/mio, 1 commit 8021e7c (amended, no
 cherry-pick trailer) on upstream master 5e2b24a. Pushed 2026-11-09.
 Compare: https://github.com/tokio-rs/mio/compare/master...lthiery:mio:registry-association
 

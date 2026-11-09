@@ -1,4 +1,4 @@
-# DRAFT: comment on tokio-rs/mio#2029 ("IoSource, SourceFd and poll(2) not rearming"). NOT POSTED.
+# SUPERSEDED 2026-11-09 by ISSUE-shared-source.md (path A: #2029 is about arbitrary fds, not our case). Kept for the SourceFd rearm data point only.
 
 Purpose: propose `Registry::register_shared` as the fix for the half of #2029
 that is mio-owned types, say plainly that it does NOT fix `SourceFd`/`AsyncFd`,

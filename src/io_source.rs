@@ -71,11 +71,10 @@ impl<T> IoSource<T> {
 
     /// Registers the source through `register`, associating it with
     /// `registry` in debug builds unless registration fails.
-    fn register_with(
-        &self,
-        _registry: &Registry,
-        register: impl FnOnce(&IoSourceState, &T) -> io::Result<()>,
-    ) -> io::Result<()> {
+    fn register_with<F>(&self, _registry: &Registry, register: F) -> io::Result<()>
+    where
+        F: FnOnce(&IoSourceState, &T) -> io::Result<()>,
+    {
         #[cfg(debug_assertions)]
         self.selector_id.associate(_registry)?;
         let result = register(&self.state, &self.inner);

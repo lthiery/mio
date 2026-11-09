@@ -158,8 +158,18 @@ for that path is the lock, not a test.
   epoll and kqueue are unaffected by construction. Through Tokio's
   `net_accept` bench on epoll (2026-11-06), `register_shared` is
   indistinguishable from the old `SourceFd` registration.
-- Review the trait name, scope, documented concurrency guarantees, and whether
-  other socket types should implement it in the initial upstream proposal.
+- Trait name SETTLED (2026-11-09): `SharedSource` / `register_shared`, not
+  Carl's 2019 `SyncSource` (mio #1064). `SyncSource` described all three
+  `Source` operations through `&self`; this trait is initial registration only,
+  on purpose (keeps #1064's `&mut` door open, avoids concurrent-deregister
+  semantics). `Sync` is also the wrong word: the property is the receiver, not
+  thread safety. Cite the comment as precedent, scope cut explained in one
+  sentence. Method stays `register_shared`, not `register`, so call sites with
+  both traits in scope are never ambiguous and the asymmetry is visible at
+  `Registry::register_shared`.
+- Still to settle: which other socket types implement it in the first proposal
+  (all `IoSource`-backed ones is the honest answer), plus `impl SharedSource
+  for SourceFd` (stateless, trivially sound, completes the trait).
 - Test Windows and other stateful backends at runtime, including races, error
   recovery, and repeated register/deregister cycles.
 - Tokio integration: DONE locally, branch `tcp-shared-registration` in

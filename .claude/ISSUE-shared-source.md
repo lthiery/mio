@@ -16,44 +16,18 @@ Initial registration through a shared reference
 
 ## Body
 
-`event::Source::register` takes `&mut self`. A consumer that registers a
-socket on its first use, from a poll, only has `&self` at that point, so today
-it has to register `SourceFd(&socket.as_raw_fd())` instead of the socket. That
-works on epoll and kqueue and silently breaks on poll(2) and Windows, where
-the socket's `IoSource` state is what rearms interest after `WouldBlock` and a
-`SourceFd` registration never sets it up.
+I'd like Tokio to register a `TcpStream` with the driver on its first use instead of at construction. The task that accepts a connection is usually not the one that drives it, so today the accept loop pays the `epoll_ctl` for every connection. In a Tokio branch, moving it to first use is worth about 13% on the accept benchmark at 4 workers. It would also decide which shard a socket lands on if the driver is sharded, as proposed in tokio-rs/tokio#8450, but the request does not depend on that.
 
-This is the case #1064 anticipated when `register` went to `&mut`: the
-concern there was a `Sync` consumer registering from `&self`, and the answer
-was "probably a new trait" (`SyncSource` was the working name). It was shelved
-because Tokio registers eagerly, which is still true, but a consumer that
-wants first-use registration has nothing to call.
+First use happens in a poll, where Tokio only has `&TcpStream`. `Source::register` takes `&mut self`, so the only way to register is `SourceFd`, and that skips the `IoSource` state that rearms interest on poll(2) and Windows. #1064 expected this to need a new trait if Tokio ever stopped registering eagerly.
 
-Proposal: a trait for initial registration only,
+Proposal, initial registration only:
 
 ```rust
 pub trait SharedSource: Source {
     fn register_shared(&self, registry: &Registry, token: Token, interests: Interest) -> io::Result<()>;
 }
-
-impl Registry {
-    pub fn register_shared<S: SharedSource + ?Sized>(&self, source: &S, token: Token, interests: Interest) -> io::Result<()>;
-}
 ```
 
-implemented for every `IoSource`-backed type and for `SourceFd`. Same
-contract as `register`: registering an already registered source stays
-unspecified, so callers that can race serialize themselves. Two things are
-added: I/O may run concurrently with the registration, and a failed
-registration may be retried. `reregister` and `deregister` stay `&mut`, so
-the door #1064 opened for lock-free implementations stays open.
+plus `Registry::register_shared`. Same contract as `register`; `reregister` and `deregister` stay `&mut`. It costs nothing on epoll and kqueue. On poll(2), event ports and Windows the per-fd state grows by 16 bytes (a `OnceLock` and a `Mutex<()>` taken only by I/O racing the registration).
 
-Cost: nothing on epoll and kqueue, where `IoSourceState` is empty; `TcpStream`
-keeps its size and `do_io` is unchanged. On poll(2), event ports and Windows
-the per-fd state is published through a `OnceLock`, with a `Mutex<()>` that
-only I/O racing the registration itself takes. That is 16 bytes per socket on
-Linux poll(2), which I would rather state than hide.
-
-I have this working for `TcpStream` with tests on epoll and forced poll(2),
-suite green on Linux and Windows. Happy to open the PR if the shape is
-acceptable, or to hear how you would rather cover the shared-reference case.
+I have it working for `TcpStream` on Linux and Windows, with the Tokio side on top. Is this a shape you'd take a PR for?
